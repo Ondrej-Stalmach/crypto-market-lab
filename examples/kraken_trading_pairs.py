@@ -8,12 +8,11 @@ from connector_kraken import KrakenClient
 
 async def main() -> None:
     async with httpx.AsyncClient(timeout=20.0) as http_client:
-        trading_pairs = await KrakenClient(http_client).get_usd_trading_pairs()
+        trading_pairs = await KrakenClient(http_client).get_spot_trading_pairs()
 
-    for market, symbols in trading_pairs.items():
-        print(f"{market.title()} ({len(symbols)} active USD pairs)")
-        pairs_frame = pd.DataFrame({"symbol": symbols})
-        print(pairs_frame.head().to_string(index=False))
+    print(f"Spot ({len(trading_pairs)} active USD pairs)")
+    pairs_frame = pd.DataFrame({"symbol": trading_pairs})
+    print(pairs_frame.head().to_string(index=False))
 
 
 if __name__ == "__main__":

@@ -1,15 +1,33 @@
-import asyncio
-from typing import Any, Literal
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from typing import Any, TypedDict
 
 import httpx
 
-Market = Literal["spot", "futures"]
-TradingPairs = dict[Market, list[str]]
-TickerResult = dict[str, Any] | list[dict[str, Any]]
+TradingPairs = list[str]
+
+
+class SpotTickerMetric(TypedDict):
+    pair: str
+    open: Decimal
+    high_price: Decimal
+    low_price: Decimal
+    close_price: Decimal
+    volume_usd_today_thousands: int
+    volume_usd_24h_thousands: int
+
+
+class Kline(TypedDict):
+    time: int
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    vwap: Decimal
+    volume: Decimal
+    count: int
+
 
 _SPOT_API_URL = "https://api.kraken.com/0/public"
-_FUTURES_TICKERS_URL = "https://futures.kraken.com/derivatives/api/v3/tickers"
-_FUTURES_INSTRUMENTS_URL = "https://futures.kraken.com/derivatives/api/v3/instruments"
 
 
 class KrakenAPIError(RuntimeError):
@@ -17,7 +35,7 @@ class KrakenAPIError(RuntimeError):
 
 
 class KrakenClient:
-    """Fetch public spot and futures market data from Kraken."""
+    """Fetch public USD spot market data from Kraken."""
 
     def __init__(
         self,
@@ -25,158 +43,193 @@ class KrakenClient:
     ) -> None:
         self._http_client = http_client
 
-    async def get_tickers(self, market: Market = "spot") -> TickerResult:
-        """Return raw Kraken tickers for USD-quoted pairs in the selected market."""
-        if market not in {"spot", "futures"}:
-            raise ValueError("market must be 'spot' or 'futures'")
-
-        return await self._fetch_tickers(self._http_client, market)
-
-    async def get_usd_trading_pairs(self) -> TradingPairs:
-        """Return active spot and futures symbols quoted in USD."""
-        return await self._fetch_usd_trading_pairs(self._http_client)
-
-    async def _fetch_tickers(
-        self,
-        http_client: httpx.AsyncClient,
-        market: Market,
-    ) -> TickerResult:
-        if market == "spot":
-            return await self._get_spot_tickers(http_client)
-        return await self._get_futures_tickers(http_client)
-
-    async def _fetch_usd_trading_pairs(
-        self,
-        http_client: httpx.AsyncClient,
-    ) -> TradingPairs:
-        spot_pairs, futures_pairs = await asyncio.gather(
-            self._get_spot_trading_pairs(http_client),
-            self._get_futures_trading_pairs(http_client),
-        )
-        return {"spot": spot_pairs, "futures": futures_pairs}
-
-    async def _get_spot_tickers(
-        self,
-        http_client: httpx.AsyncClient,
-    ) -> dict[str, Any]:
-        pairs_response = await http_client.get(f"{_SPOT_API_URL}/AssetPairs")
-        pairs = _spot_result(pairs_response)
-        selected_pairs = [
-            pair_id
-            for pair_id, pair in pairs.items()
-            if isinstance(pair, dict)
-            and _normalize_quote_currency(pair.get("quote")) == "USD"
-        ]
-        if not selected_pairs:
-            return {}
-
-        ticker_response = await http_client.get(
+    async def get_spot_tickers(self) -> list[SpotTickerMetric]:
+        """Return USD spot prices and today's and 24-hour volumes in thousands."""
+        ticker_response = await self._http_client.get(
             f"{_SPOT_API_URL}/Ticker",
-            params={"pair": ",".join(selected_pairs)},
+            params={"assetVersion": 1},
         )
-        tickers = _spot_result(ticker_response)
-        selected_pair_ids = set(selected_pairs)
-        return {
-            pair_id: ticker
-            for pair_id, ticker in tickers.items()
-            if pair_id in selected_pair_ids
-        }
+        tickers = _response_result(ticker_response, "spot")
 
-    async def _get_spot_trading_pairs(
-        self,
-        http_client: httpx.AsyncClient,
-    ) -> list[str]:
-        response = await http_client.get(
+        spot_metrics: list[SpotTickerMetric] = []
+        for pair_id, ticker in tickers.items():
+            if not pair_id.upper().endswith("/USD"):
+                continue
+            if not isinstance(ticker, dict):
+                raise KrakenAPIError(
+                    f"Kraken spot ticker for {pair_id} is not an object"
+                )
+
+            high_prices = ticker.get("h")
+            low_prices = ticker.get("l")
+            close_prices = ticker.get("c")
+            volumes = ticker.get("v")
+            average_prices = ticker.get("p")
+            if (
+                not isinstance(high_prices, list)
+                or not high_prices
+                or not isinstance(low_prices, list)
+                or not low_prices
+                or not isinstance(close_prices, list)
+                or not close_prices
+                or not isinstance(volumes, list)
+                or len(volumes) < 2
+                or not isinstance(average_prices, list)
+                or len(average_prices) < 2
+            ):
+                raise KrakenAPIError(
+                    f"Kraken spot ticker for {pair_id} is missing price or volume data"
+                )
+
+            try:
+                open_price = Decimal(str(ticker.get("o")))
+                high_price = Decimal(str(high_prices[0]))
+                low_price = Decimal(str(low_prices[0]))
+                close_price = Decimal(str(close_prices[0]))
+                volume_today = Decimal(str(volumes[0]))
+                vwap_today = Decimal(str(average_prices[0]))
+                volume_24h = Decimal(str(volumes[1]))
+                vwap_24h = Decimal(str(average_prices[1]))
+            except (InvalidOperation, ValueError) as error:
+                raise KrakenAPIError(
+                    f"Kraken spot ticker for {pair_id} has invalid price or volume data"
+                ) from error
+
+            if not all(
+                value.is_finite()
+                for value in (
+                    open_price,
+                    high_price,
+                    low_price,
+                    close_price,
+                    volume_today,
+                    vwap_today,
+                    volume_24h,
+                    vwap_24h,
+                )
+            ):
+                raise KrakenAPIError(
+                    f"Kraken spot ticker for {pair_id} has invalid price or volume data"
+                )
+
+            spot_metrics.append(
+                {
+                    "pair": pair_id,
+                    "open": open_price,
+                    "high_price": high_price,
+                    "low_price": low_price,
+                    "close_price": close_price,
+                    "volume_usd_today_thousands": int(
+                        (volume_today * vwap_today / Decimal("1000")).quantize(
+                            Decimal("1"), rounding=ROUND_HALF_UP
+                        )
+                    ),
+                    "volume_usd_24h_thousands": int(
+                        (volume_24h * vwap_24h / Decimal("1000")).quantize(
+                            Decimal("1"), rounding=ROUND_HALF_UP
+                        )
+                    ),
+                }
+            )
+
+        return sorted(spot_metrics, key=lambda metric: metric["pair"])
+
+    async def get_kline(self, pair: str, interval: int = 1) -> list[Kline]:
+        """Return OHLC candles for a spot pair at the requested minute interval."""
+        response = await self._http_client.get(
+            f"{_SPOT_API_URL}/OHLC",
+            params={"pair": pair, "interval": interval},
+        )
+        result = _response_result(response, "OHLC")
+
+        pair_candles = [candles for key, candles in result.items() if key != "last"]
+        if len(pair_candles) != 1 or not isinstance(pair_candles[0], list):
+            raise KrakenAPIError("Kraken OHLC response is missing a candle array")
+
+        klines: list[Kline] = []
+        for candle in pair_candles[0]:
+            if not isinstance(candle, list) or len(candle) != 8:
+                raise KrakenAPIError("Kraken OHLC response contains an invalid candle")
+
+            try:
+                timestamp = int(candle[0])
+                open_price, high_price, low_price, close_price, vwap, volume = (
+                    Decimal(str(value)) for value in candle[1:7]
+                )
+                count = int(candle[7])
+            except (InvalidOperation, OverflowError, TypeError, ValueError) as error:
+                raise KrakenAPIError(
+                    "Kraken OHLC response contains invalid candle data"
+                ) from error
+
+            if not all(
+                value.is_finite()
+                for value in (
+                    open_price,
+                    high_price,
+                    low_price,
+                    close_price,
+                    vwap,
+                    volume,
+                )
+            ):
+                raise KrakenAPIError(
+                    "Kraken OHLC response contains invalid candle data"
+                )
+
+            klines.append(
+                {
+                    "time": timestamp,
+                    "open": open_price,
+                    "high": high_price,
+                    "low": low_price,
+                    "close": close_price,
+                    "vwap": vwap,
+                    "volume": volume,
+                    "count": count,
+                }
+            )
+
+        return klines
+
+    async def get_spot_trading_pairs(self) -> TradingPairs:
+        """Return USD spot pairs available for normal trading.
+
+        Only `online` pairs are included. Restricted statuses are excluded:
+        `cancel_only` allows canceling existing orders; `post_only` allows only
+        maker orders; `limit_only` allows only limit orders; `reduce_only` allows
+        only reducing an existing position.
+        """
+        response = await self._http_client.get(
             f"{_SPOT_API_URL}/AssetPairs",
             params={"assetVersion": 1, "aclass_base": "currency"},
         )
-        pairs = _spot_result(response)
+        pairs = _response_result(response, "spot")
+
         return sorted(
             {
                 symbol
                 for pair in pairs.values()
                 if isinstance(pair, dict)
-                and _normalize_quote_currency(pair.get("quote")) == "USD"
                 and pair.get("status") == "online"
                 and isinstance(symbol := pair.get("altname"), str)
-            }
-        )
-
-    async def _get_futures_tickers(
-        self,
-        http_client: httpx.AsyncClient,
-    ) -> list[dict[str, Any]]:
-        response = await http_client.get(_FUTURES_TICKERS_URL)
-        response.raise_for_status()
-        payload = response.json()
-        if not isinstance(payload, dict):
-            raise KrakenAPIError("Kraken futures response is not a JSON object")
-        if payload.get("result") != "success":
-            error = payload.get("errors") or payload.get("error") or "unknown error"
-            raise KrakenAPIError(f"Kraken futures API error: {error}")
-
-        tickers = payload.get("tickers")
-        if not isinstance(tickers, list):
-            raise KrakenAPIError("Kraken futures response is missing tickers")
-        return [
-            ticker
-            for ticker in tickers
-            if isinstance(ticker, dict) and _futures_quote(ticker.get("pair")) == "USD"
-        ]
-
-    async def _get_futures_trading_pairs(
-        self,
-        http_client: httpx.AsyncClient,
-    ) -> list[str]:
-        response = await http_client.get(_FUTURES_INSTRUMENTS_URL)
-        response.raise_for_status()
-        payload = response.json()
-        if not isinstance(payload, dict):
-            raise KrakenAPIError("Kraken futures response is not a JSON object")
-        if payload.get("result") != "success":
-            error = payload.get("errors") or payload.get("error") or "unknown error"
-            raise KrakenAPIError(f"Kraken futures API error: {error}")
-
-        instruments = payload.get("instruments")
-        if not isinstance(instruments, list):
-            raise KrakenAPIError("Kraken futures response is missing instruments")
-        return sorted(
-            {
-                symbol
-                for instrument in instruments
-                if isinstance(instrument, dict)
-                and instrument.get("tradeable") is True
-                and not instrument.get("isExpired", False)
-                and _normalize_quote_currency(instrument.get("quote")) == "USD"
-                and isinstance(symbol := instrument.get("symbol"), str)
+                and symbol.upper().endswith("USD")
             }
         )
 
 
-def _spot_result(response: httpx.Response) -> dict[str, Any]:
+def _response_result(response: httpx.Response, endpoint: str) -> dict[str, Any]:
     response.raise_for_status()
     payload = response.json()
     if not isinstance(payload, dict):
-        raise KrakenAPIError("Kraken spot response is not a JSON object")
+        raise KrakenAPIError(f"Kraken {endpoint} response is not a JSON object")
 
     errors = payload.get("error", [])
     if errors:
         message = ", ".join(str(error) for error in errors)
-        raise KrakenAPIError(f"Kraken spot API error: {message}")
+        raise KrakenAPIError(f"Kraken {endpoint} API error: {message}")
 
     result = payload.get("result")
     if not isinstance(result, dict):
-        raise KrakenAPIError("Kraken spot response is missing a result object")
+        raise KrakenAPIError(f"Kraken {endpoint} response is missing a result object")
     return result
-
-
-def _normalize_quote_currency(quote: Any) -> str | None:
-    if not isinstance(quote, str):
-        return None
-    return quote.removeprefix("Z").upper()
-
-
-def _futures_quote(pair: Any) -> str | None:
-    if not isinstance(pair, str) or ":" not in pair:
-        return None
-    return pair.rsplit(":", maxsplit=1)[1].upper()

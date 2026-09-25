@@ -20,7 +20,9 @@ crypto-market-lab/
 ├── examples/
 │   ├── binance_trading_pairs.py
 │   ├── bybit_trading_pairs.py
-│   └── kraken_usd_ticker_volumes.py
+│   ├── kraken_kline.py
+│   ├── kraken_tickers.py
+│   └── kraken_trading_pairs.py
 ├── packages/
 │   ├── binance/
 │   │   ├── pyproject.toml
@@ -70,7 +72,9 @@ Use `uv` to sync the workspace and run examples and checks:
 uv sync --locked
 uv run python examples/binance_trading_pairs.py
 uv run python examples/bybit_trading_pairs.py
-uv run python examples/kraken_usd_ticker_volumes.py
+uv run python examples/kraken_trading_pairs.py
+uv run python examples/kraken_tickers.py
+uv run python examples/kraken_kline.py
 uv run pytest
 uv run ruff check .
 uv run ruff format --check .

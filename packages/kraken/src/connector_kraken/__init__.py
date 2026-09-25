@@ -1,3 +1,15 @@
-from .client import KrakenAPIError, KrakenClient, Market, TradingPairs
+from .client import (
+    Kline,
+    KrakenAPIError,
+    KrakenClient,
+    SpotTickerMetric,
+    TradingPairs,
+)
 
-__all__ = ["KrakenAPIError", "KrakenClient", "Market", "TradingPairs"]
+__all__ = [
+    "Kline",
+    "KrakenAPIError",
+    "KrakenClient",
+    "SpotTickerMetric",
+    "TradingPairs",
+]
